@@ -1,0 +1,5 @@
+resolver: lts-16.16
+packages:
+- .
+extra-deps:
+- megaparsec-9.0.1@sha256:b0d7cd8843af2687b1a5a4add523836c782c400a375e4d7b6989a827b5605ac6,3117
