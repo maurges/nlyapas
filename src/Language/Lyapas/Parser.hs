@@ -1,20 +1,17 @@
-{-# LANGUAGE OverloadedStrings, LambdaCase #-}
-{-# OPTIONS_GHC -Wno-unused-top-binds -Wno-unused-imports #-}
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
 module Language.Lyapas.Parser
 --     (
 --     ) where
 where
 
-import Control.Applicative (empty, liftA2, liftA3, (<|>))
-import Control.Applicative.Permutations (runPermutation, toPermutationWithDefault)
+import Control.Applicative (liftA2, liftA3)
+-- import Control.Applicative.Permutations (runPermutation, toPermutationWithDefault)
 import Control.Monad (void)
-import Control.Monad.Combinators (optional, skipManyTill, between, sepBy)
 import Data.Bits (shiftL)
-import Data.Default.Class (def)
+-- import Data.Default.Class (def)
 import Data.Int (Int64)
 import Data.List (foldl')
-import Data.Maybe (fromMaybe)
+-- import Data.Maybe (fromMaybe)
 import Data.MonoTraversable (opoint)
 import Data.Text (Text, cons, pack)
 import Data.Void (Void)

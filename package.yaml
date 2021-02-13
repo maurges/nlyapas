@@ -1,9 +1,10 @@
 name:                language-lyapas
 version:             0.1.0.0
-license:             GPL3
+license:             GPL-3
 author:              "d86leader"
 maintainer:          "d86leader@mail.com"
 
+category: Language
 synopsis: "Analysis and generation of lyapas code"
 description:
   " A haskell library for analysis and generation of lyapas code.
@@ -11,16 +12,29 @@ description:
   and an interpreter for the intermediate representation.
   Soon to have a compiler too!
   "
-category: Language
 
 library:
   source-dirs:         src
   ghc-options:
   - -Wall -Wcompat
+  default-extensions: OverloadedStrings LambdaCase BangPatterns
   dependencies:
   - base
+  - bytestring
   - data-default-class
+  - clock
+  - exceptions
+  - hashable
   - megaparsec >= 9.0.0
+  - microlens
+  - microlens-mtl
+  - microlens-platform
+  - microlens-th
   - mono-traversable
+  - mtl
   - parser-combinators
+  - random
   - text
+  - transformers
+  - unordered-containers
+  - vector

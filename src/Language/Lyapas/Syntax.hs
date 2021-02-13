@@ -1,6 +1,7 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
 module Language.Lyapas.Syntax where
 
+import Data.Hashable (Hashable)
 import Data.Int (Int64)
 import Data.String (IsString)
 import Data.Text (Text)
@@ -78,12 +79,12 @@ data ComplexName
     | LongComplex ComplexIdentifier
     deriving (Eq, Show)
 
-newtype FunctionName = FunctionName Text  deriving (Eq, Show)
-newtype VarName = VarName Text  deriving (Eq, Show, IsString)
-newtype ComplexIdentifier = ComplexIdentifier Text  deriving (Eq, Show)
-newtype ParagraphName = ParagraphName Text  deriving (Eq, Show, IsString)
-newtype OperatorName = OperatorName Text  deriving (Eq, Show, IsString)
-newtype StringLiteral = StringLiteral Text  deriving (Eq, Show)
+newtype FunctionName = FunctionName Text  deriving (Eq, Show, IsString, Hashable)
+newtype VarName = VarName Text  deriving (Eq, Show, IsString, Hashable)
+newtype ComplexIdentifier = ComplexIdentifier Text  deriving (Eq, Show, IsString, Hashable)
+newtype ParagraphName = ParagraphName Text  deriving (Eq, Show, IsString, Hashable)
+newtype OperatorName = OperatorName Text  deriving (Eq, Show, IsString, Hashable)
+newtype StringLiteral = StringLiteral Text  deriving (Eq, Show, IsString, Hashable)
 
 {-
 -----------------------
