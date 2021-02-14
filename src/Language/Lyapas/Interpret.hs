@@ -25,6 +25,7 @@ import Data.Int (Int64)
 import Data.MonoTraversable (olength, olength64, Element)
 import Data.Sequences (index, fromList, IsSequence, Index, take, snoc)
 import Data.Text (Text, pack, unpack)
+import Data.Text.Encoding (encodeUtf8)
 import Data.Vector.Storable (Vector)
 import Optics.At () -- instances for bytestrings and vectors
 import Optics.Core (ix, (%), (&), (.~), _1, _2) -- orphans for bytestrings and vectors
@@ -168,9 +169,9 @@ runCompute = \case
     Nullary (OP":bit-negate") -> nullary complement
     Nullary (OP":bit-weight") -> nullary (fromIntegral . popCount)
     --
-    Unary (OP":set-null") op -> unarySet op (\_t _old -> 0)
-    Unary (OP":set-full") op -> unarySet op (\_t _old -> complement 0)
-    Unary (OP":set-assign") op -> unarySet op (\t _old -> t)
+    Unary (OP":set-null") op -> create op >> unarySet op (\_t _old -> 0)
+    Unary (OP":set-full") op -> create op >> unarySet op (\_t _old -> complement 0)
+    Unary (OP":set-assign") op -> create op >> unarySet op (\t _old -> t)
     --
     Unary (OP":disjunction") op -> unary op (.|.)
     Unary (OP":conjunction") op -> unary op (.&.)
@@ -190,9 +191,16 @@ runCompute = \case
     ComplexNullary (OP":complex-shrink") comp -> complexShrink comp
     ComplexNullary (OP":complex-push") comp -> use tau >>= complexPush comp
     ComplexNullary (OP":complex-print") comp -> complexPrint comp
+    ComplexNullary (OP":complex-read") comp -> complexRead comp
+    ComplexSymbols (OP":complex-append") comp str -> complexAppend comp str
     where
         nullary :: (Int64 -> Int64) -> LyapasT IO ()
         nullary op = tau %= op
+        --
+        create :: Operand -> LyapasT IO ()
+        create (MutableOperand ident@(IdentVar _)) = setIdentifier ident 0
+        create _ = pure () -- either they implicitly exist, or will throw non-mutable error later
+        --
         unarySet, unary :: Operand -> (Int64 -> Int64 -> Int64) -> LyapasT IO ()
         unarySet (MutableOperand ident) f = do
             t <- use tau
@@ -373,6 +381,28 @@ complexPrint (ShortComplex name) = do
         Just (bs, _) -> liftIO . B8.putStr $ bs
 complexPrint (LongComplex name) = throwM . TypeError $
     "Can't print long complex " <> tshow name
+
+complexRead :: ComplexName -> LyapasT IO ()
+complexRead (ShortComplex name) = preuse (shorts % ix name) >>= \case
+    Nothing -> throwM . NameError $ tshow name <> " does not exist"
+    Just (old, cap) -> do
+        new <- encodeUtf8 <$> liftIO TIO.getLine
+        when (olength old + olength new > cap) $
+            throwM . IndexError $ tshow name <> " is not big enough for append"
+        shorts % ix name % _1 .= old <> new
+complexRead (LongComplex name) =
+    throwM . TypeError $ tshow name <> " is not a byte complex"
+
+complexAppend :: ComplexName -> StringLiteral -> LyapasT IO ()
+complexAppend (ShortComplex name) (StringLiteral text) = preuse (shorts % ix name) >>= \case
+    Nothing -> throwM . NameError $ tshow name <> " does not exist"
+    Just (old, cap) -> do
+        let new = encodeUtf8 text
+        when (olength old + olength new > cap) $
+            throwM . IndexError $ tshow name <> " is not big enough for append"
+        shorts % ix name % _1 .= old <> new
+complexAppend (LongComplex name) _ =
+    throwM . TypeError $ tshow name <> " is not a byte complex"
 
 complexExists :: ComplexIdentifier -> LyapasT IO Bool
 complexExists name = do
