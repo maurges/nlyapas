@@ -7,6 +7,7 @@ module Language.Lyapas.Interpret
     ( runProgram
     , runFunction
     , runParagraph
+    , InterpretError (..)
     ) where
 
 import Control.Exception (Exception)
@@ -14,7 +15,7 @@ import Control.Monad (void, when)
 import Control.Monad.Catch (throwM)
 import Control.Monad.Except (ExceptT (..), runExceptT)
 import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (ReaderT, runReaderT)
+import Control.Monad.Reader (ReaderT, runReaderT, reader)
 import Control.Monad.State.Strict (StateT, runStateT)
 import Control.Monad.Trans.Class (lift)
 import Data.Bits (shiftL, shiftR, (.|.), (.&.), testBit, countTrailingZeros, finiteBitSize, complement, popCount, xor)
@@ -27,8 +28,8 @@ import Data.Sequences (index, fromList, IsSequence, Index, take, snoc)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector.Storable (Vector)
-import Optics.At () -- instances for bytestrings and vectors
-import Optics.Core (ix, (%), (&), (.~), _1, _2) -- orphans for bytestrings and vectors
+import Optics.At () -- instances for bytestrings and vectors and hashmaps
+import Optics.Core (at, ix, (%), (&), (.~), (^?), _1, _2) -- orphans for bytestrings and vectors
 import Optics.Lens (Lens')
 import Optics.State (use, preuse)
 import Optics.State.Operators ((%=), (.=))
@@ -36,6 +37,7 @@ import Optics.TH (makeLenses)
 import System.Clock (Clock (Realtime), getTime, sec)
 import System.Random (randomIO, setStdGen, mkStdGen)
 
+import qualified Control.Monad.State.Strict as State
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.Text.IO as TIO
 
@@ -52,11 +54,14 @@ data FunctionState = FunctionState
     } deriving (Eq, Show)
 makeLenses ''FunctionState
 
-data ArgumentMap = ArgumentMap
-    { argVars :: [(Text, Text)]
-    , argLongs :: [(Text, Text)]
-    , argShorts :: [(Text, Text)]
-    } deriving (Eq, Show)
+emptyState :: FunctionState
+emptyState = FunctionState
+    { _tau = 0
+    , _vars = mapFromList []
+    , _longs = mapFromList []
+    , _shorts = mapFromList []
+    , _overflow = 0
+    }
 
 type ProgramFunctions = [Function]
 
@@ -67,6 +72,7 @@ data InterpretError
     | TypeError Text
     | IndexError Text
     | NameError Text
+    | NotImplemented Text
     deriving (Eq, Show)
 instance Exception InterpretError
 
@@ -78,19 +84,55 @@ runProgram (Program funcs) = do
         (Function _ [] [] body):_ -> pure body
         (Function (FunctionName name) _ _ _):_ -> throwM . TypeError $
             "Function " <> name <> " (first function in program) should have no arguments"
-    let initialState = FunctionState
-            { _tau = 0
-            , _vars = mapFromList []
-            , _longs = mapFromList []
-            , _shorts = mapFromList []
-            , _overflow = 0
-            }
-    void $ runReaderT (runStateT (runFunction func) initialState) funcs
+    void $ runReaderT (runStateT (runFunction func) emptyState) funcs
 
 -- | Prepare new "stack frame" for function, run it, and update outer stack
 -- frame on exit
-callFunction :: Function -> LyapasT IO ()
-callFunction = error "call function"
+callFunction
+    :: FunctionName
+    -> [Either ComplexName Operand]
+    -> [Argument]
+    -> LyapasT IO ()
+callFunction name rargs wargs = reader ( filter ((== name) . functionName) ) >>= \case
+    [] -> throwM . NameError $ tshow name <> " not found"
+    (Function _ frargs fwargs body):_ -> do
+        when (olength rargs /= olength frargs || olength wargs /= olength fwargs) $
+            throwM . TypeError $ "Incorrect amount of arguments"
+        s <- State.get
+        State.put emptyState
+        mapM_ (uncurry $ copyRArgFromTo s) $ zip rargs frargs
+        mapM_ (uncurry $ copyWArgFromTo s) $ zip wargs fwargs
+        runFunction body
+        finishState <- State.get
+        State.put s
+        mapM_ (uncurry $ copyWArgFromTo finishState) $ zip fwargs wargs -- order!
+    where
+        copyWArgFromTo s (ArgVar source) (ArgVar dest) = copy s vars source dest
+        copyWArgFromTo s (ArgComplex (LongComplex source)) (ArgComplex (LongComplex dest)) =
+            copy s longs source dest
+        copyWArgFromTo s (ArgComplex (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
+            copy s shorts source dest
+        copyWArgFromTo _ source dest = throwM . TypeError $
+            "Mismatch between " <> tshow source <> " and " <> tshow dest
+        --
+        copyRArgFromTo s (Left (LongComplex source)) (ArgComplex (LongComplex dest)) =
+            copy s longs source dest
+        copyRArgFromTo s (Left (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
+            copy s shorts source dest
+        copyRArgFromTo s (Right op) (ArgVar dest) = do
+            oldState <- State.get
+            State.put s
+            source <- getOperand op
+            State.put oldState
+            vars % at dest .= Just source
+        copyRArgFromTo _ source dest = throwM . TypeError $
+            "Mismatch between " <> tshow source <> " and " <> tshow dest
+        --
+        copy s lens source dest = case s ^? lens % at source of
+            Nothing -> do
+                throwM . NameError $ "Bad function call mapping " <> tshow source <> " to " <> tshow dest <> "\nin " <> tshow s
+            Just x -> lens % at dest .= x
+
 
 -- | Run function in current "stack frame"
 runFunction :: [Paragraph] -> LyapasT IO ()
@@ -190,9 +232,14 @@ runCompute = \case
     ComplexNullary (OP":complex-delete") comp -> complexDelete comp
     ComplexNullary (OP":complex-shrink") comp -> complexShrink comp
     ComplexNullary (OP":complex-push") comp -> use tau >>= complexPush comp
+    ComplexNullary (OP":set-null") comp -> complexSetNull comp
     ComplexNullary (OP":complex-print") comp -> complexPrint comp
     ComplexNullary (OP":complex-read") comp -> complexRead comp
     ComplexSymbols (OP":complex-append") comp str -> complexAppend comp str
+    --
+    f@(FunctionCall name rargs wargs) -> callFunction name rargs wargs
+    --
+    other -> throwM . NotImplemented . tshow $ other
     where
         nullary :: (Int64 -> Int64) -> LyapasT IO ()
         nullary op = tau %= op
@@ -212,6 +259,11 @@ runCompute = \case
             t <- use tau
             x <- getOperand op
             tau .= f t x
+
+debugState :: LyapasT IO ()
+debugState = do
+    s <- State.get
+    liftIO . putStrLn $ "#debug state:" <> show s
 
 getOperand :: Operand -> LyapasT IO Int64
 getOperand = \case
@@ -311,11 +363,11 @@ setIdentifier i value = case i of
         s <- use shorts
         l <- use longs
         case (lookup name s, lookup name l) of
-            (Just (_, oldCap), _) -> do
-                when (oldCap > cap) $ complexSetSize shorts name cap
+            (Just (v, _), _) -> do
+                when (olength v > cap) $ complexSetSize shorts name cap
                 shorts % ix name % _2 .= cap
-            (_, Just (_, oldCap)) -> do
-                when (oldCap > cap) $ complexSetSize longs name cap
+            (_, Just (v, _)) -> do
+                when (olength v > cap) $ complexSetSize longs name cap
                 longs % ix name % _2 .= cap
             (Nothing, Nothing) ->
                 throwM . NotFound $ "Using " <> tshow name <> " before creation"
@@ -349,7 +401,7 @@ complexSetSize complexes name size = do
         Just x -> pure x
     when (size > cap) $ throwM . IndexError $ tshow name <> " doesn't have enough capacity"
     let oldSize = olength vec
-    if oldSize <= size
+    if oldSize >= size
         then complexes % ix name % _1 %= take size
         else complexes % ix name % _1 .= (vec <> fromList (replicate (size - oldSize) 0))
 
@@ -373,6 +425,13 @@ complexPush n val = ensureComplexExists n >> case n of
         if olength vec >= cap
             then throwM . IndexError $ "Can't push into " <> tshow name <> ": too small"
             else shorts % ix name % _1 %= flip snoc (fromIntegral val)
+
+complexSetNull :: ComplexName -> LyapasT IO ()
+complexSetNull n = ensureComplexExists n >> case n of
+    LongComplex name ->
+        longs % ix name % _1 %= fromList . flip replicate 0 . olength
+    ShortComplex name ->
+        shorts % ix name % _1 %= fromList . flip replicate 0 . olength
 
 complexPrint :: ComplexName -> LyapasT IO ()
 complexPrint (ShortComplex name) = do
@@ -431,6 +490,9 @@ tshow = pack . show
 
 unOperatorName :: OperatorName -> Text
 unOperatorName (OperatorName n) = n
+
+functionName :: Function -> FunctionName
+functionName (Function x _ _ _) = x
 
 pattern OP :: String -> OperatorName
 pattern OP str <- (unpack . unOperatorName -> str)

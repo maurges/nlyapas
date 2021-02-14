@@ -233,8 +233,8 @@ identifier :: Parser Identifier
 identifier = lexeme $
         fmap IdentVar varName
     <|> liftA2 IdentComplexElement complexName complexIndex
-    <|> fmap IdentComplexSize (lexeme $ char 'Q' *> complexIdentifier)
-    <|> fmap IdentComplexCap (lexeme $ char 'S' *> complexIdentifier)
+    <|> fmap IdentComplexSize (char 'Q' *> complexIdentifier)
+    <|> fmap IdentComplexCap (char 'S' *> complexIdentifier)
 
 complexIndex :: Parser Operand
 complexIndex
