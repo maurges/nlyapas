@@ -26,12 +26,11 @@ library:
   - exceptions
   - hashable
   - megaparsec >= 9.0.0
-  - microlens
-  - microlens-mtl
-  - microlens-platform
-  - microlens-th
   - mono-traversable
   - mtl
+  - optics-core
+  - optics-extra
+  - optics-th
   - parser-combinators
   - random
   - text
