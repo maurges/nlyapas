@@ -18,7 +18,7 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (ReaderT, runReaderT, reader)
 import Control.Monad.State.Strict (StateT, runStateT)
 import Control.Monad.Trans.Class (lift)
-import Data.Bits (shiftL, shiftR, (.|.), (.&.), testBit, countTrailingZeros, finiteBitSize, complement, popCount, xor)
+import Data.Bits (shiftL, shiftR, (.|.), (.&.), testBit, countTrailingZeros, finiteBitSize, complement, popCount, xor, clearBit)
 import Data.ByteString (ByteString)
 import Data.Containers (mapFromList, lookup, insertMap, member, deleteMap)
 import Data.HashMap.Strict (HashMap)
@@ -128,7 +128,7 @@ callFunction name rargs wargs = reader ( filter ((== name) . functionName) ) >>=
         copyRArgFromTo _ source dest = throwM . TypeError $
             "Mismatch between " <> tshow source <> " and " <> tshow dest
         --
-        copy s lens source dest = case s ^? lens % at source of
+        copy s lens source dest = case s ^? lens % at source of -- XXX look at this carefully
             Nothing -> do
                 throwM . NameError $ "Bad function call mapping " <> tshow source <> " to " <> tshow dest <> "\nin " <> tshow s
             Just x -> lens % at dest .= x
@@ -182,6 +182,7 @@ runControl = \case
     GoEnumerateZeros name val enumerator -> do
         v <- lift $ getIdentifier val
         let oneIndex = countTrailingZeros v
+        lift $ setIdentifier val $ clearBit v oneIndex
         if oneIndex == finiteBitSize v -- all are zeroes
             then do
                 lift $ setIdentifier enumerator 0

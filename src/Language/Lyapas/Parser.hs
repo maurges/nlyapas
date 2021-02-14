@@ -73,6 +73,7 @@ keywordNonDigit = letterChar <|> char '_'
 program :: Parser Program
 program = do
     optional shabangLine
+    space
     p <- Program <$> many function
     eof
     pure p
@@ -319,7 +320,7 @@ paragraph = many $ choice
     , goto "→" Goto
     , goto "↪" GoZero
     , goto "↦" GoNotZero
-    , fmap Control $ symbol "↑" *> liftA2 GoCondition (braced condition) paragraphName
+    , fmap Control $ symbol "↑" *> conditionOrEnumerate
     -- операции над комплексами
     , fmap Compute $ char '@' *> complexOperation
     ]
@@ -332,6 +333,9 @@ paragraph = many $ choice
     swapComplexes = fmap Compute $ symbol "⇔" *>
         (braced $ liftA3 SwapComplex (lexeme complexName) (lexeme complexIndex) (lexeme complexIndex))
     goto sym op = symbol sym *> (Control . op <$> paragraphName)
+    conditionOrEnumerate
+          = (symbol "X" *> liftA3 GoEnumerateZeros paragraphName identifier identifier)
+        <|> (liftA2 GoCondition (braced condition) paragraphName)
 
 condition :: Parser Condition
 condition = liftA3 Condition operand comparison operand
