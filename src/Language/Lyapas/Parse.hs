@@ -1,5 +1,5 @@
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
-module Language.Lyapas.Parser
+module Language.Lyapas.Parse
 --     (
 --     ) where
 where
@@ -291,7 +291,7 @@ paragraph = many $ choice
     [ try $ unary 'O' ":set-null" -- пересекается с комплексом
     , char 'O' *> fmap (Compute . ComplexNullary ":set-null") complexName
     -- почти одинаковый синтаксис с умножением
-    , try $ Compute <$> functionCall
+    , Compute <$> functionCall
     -- почти одинаковый синтаксис с делением
     , try $ char '/' *> fmap Compute ioOperation
     -- передача значения
@@ -352,8 +352,11 @@ comparison = choice . map (\(s, o) -> symbol s *> pure o) $
 
 functionCall :: Parser ComputeStatement
 functionCall = do
-    char '*' -- no space after
-    name <- functionName
+    name <- try $ do
+      char '*' -- no space after
+      name <- functionName
+      lookAhead $ char '('
+      pure name
     (rargs, wargs) <- braced $ do
         rargs <- sepBy anyArument (symbol ",")
         symbol "/"

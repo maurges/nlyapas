@@ -5,7 +5,7 @@ module Language.Lyapas.Test
 import Control.Monad.Catch (handle)
 import Data.Text (Text)
 import Language.Lyapas.Interpret (runProgram, InterpretError (..))
-import Language.Lyapas.Parser (program, functionBody, paragraph)
+import Language.Lyapas.Parse (program, functionBody, paragraph)
 import Language.Lyapas.Syntax (Function (..), Program (..), Paragraph (..))
 import Text.Megaparsec (parse, errorBundlePretty)
 

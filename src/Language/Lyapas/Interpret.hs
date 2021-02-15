@@ -238,7 +238,7 @@ runCompute = \case
     ComplexNullary (OP":complex-read") comp -> complexRead comp
     ComplexSymbols (OP":complex-append") comp str -> complexAppend comp str
     --
-    f@(FunctionCall name rargs wargs) -> callFunction name rargs wargs
+    FunctionCall name rargs wargs -> callFunction name rargs wargs
     --
     other -> throwM . NotImplemented . tshow $ other
     where
