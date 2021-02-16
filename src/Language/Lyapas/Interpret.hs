@@ -9,6 +9,8 @@ module Language.Lyapas.Interpret
     , runFunction
     , runParagraph
     , InterpretError (..), Traceback
+    -- * Internal stuff
+    , FunctionState (..), emptyState, ExecutionState (..)
     ) where
 
 import Control.Exception (Exception)
