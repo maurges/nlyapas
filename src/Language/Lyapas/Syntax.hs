@@ -35,7 +35,7 @@ data ComputeStatement
     | ComplexUnary OperatorName ComplexName Operand
     | ComplexSymbols OperatorName ComplexName StringLiteral
     | StringLiteralStatement OperatorName StringLiteral
-    | FunctionCall FunctionName [Either ComplexName Operand] [Argument]
+    | FunctionCall FunctionName [Either ComplexName Operand] [Either ComplexName Identifier]
     deriving (Eq, Show)
 
 data ControlStatement

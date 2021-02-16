@@ -6,7 +6,7 @@ import Control.Monad.Catch (handle)
 import Data.Text (Text)
 import Language.Lyapas.Interpret (runProgram, InterpretError (..))
 import Language.Lyapas.Parse (program, functionBody, paragraph)
-import Language.Lyapas.Syntax (Function (..), Program (..), Paragraph (..))
+import Language.Lyapas.Syntax (Function (..), Program (..), Paragraph (..), FunctionName (..))
 import Text.Megaparsec (parse, errorBundlePretty)
 
 import qualified Data.Text.IO as TIO
@@ -41,9 +41,18 @@ execFile path = handle interpretError $ do
         Right body -> runProgram body
     where
         interpretError :: InterpretError -> IO ()
-        interpretError = TIO.putStrLn . \case
-            NotFound s -> "NotFound: " <> s
-            TypeError s -> "TypeError: " <> s
-            IndexError s -> "IndexError: " <> s
-            NameError s -> "NameError: " <> s
-            NotImplemented s -> "NotImplemented: " <> s
+        interpretError err =
+            let (text, trace) = case err of
+                    NotFound s t -> ("NotFound: " <> s, t)
+                    TypeError s t -> ("TypeError: " <> s, t)
+                    IndexError s t -> ("IndexError: " <> s, t)
+                    NameError s t -> ("NameError: " <> s, t)
+                    ValueError s t -> ("ValueError: " <> s, t)
+                    NotImplemented s t -> ("NotImplemented: " <> s, t)
+            in TIO.putStrLn text >> putTrace trace
+        putTrace :: [FunctionName] -> IO ()
+        putTrace ((FunctionName n):ns) = do
+            TIO.putStrLn $ "Required from \"" <> n <> "\""
+            putTrace ns
+        putTrace [] = pure ()
+

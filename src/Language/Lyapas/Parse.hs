@@ -175,7 +175,7 @@ paragraphName = lexeme $ ParagraphName . pack <$> some digitChar
 stringLiteral :: Parser StringLiteral
 stringLiteral = fmap (StringLiteral . pack) $ do
     char '\''
-    str <- many stringChar
+    str <- many stringChar <?> "character or escape sequence (\\\\, \\n, \\')"
     char '\''
     pure str
     where
@@ -201,13 +201,13 @@ numberParser base postfix digit = lexeme $ do
         step a c = a * base + fromIntegral (Char.digitToInt c)
 
 singleOneConstant :: Parser Int64
-singleOneConstant = do
+singleOneConstant = lexeme $ label "unit constant" $ do
     char 'I'
     shift <- decimal
     pure $ 1 `shiftL` fromIntegral shift
 
 charConstant :: Parser Int64
-charConstant = lexeme $ do
+charConstant = lexeme $ label "char constant" $ do
     char '\''
     c <- stringChar
     char '\''
@@ -352,33 +352,39 @@ comparison = choice . map (\(s, o) -> symbol s *> pure o) $
 
 functionCall :: Parser ComputeStatement
 functionCall = do
+    -- only try until bracket. If we found bracket, that is surely a function
+    -- call
     name <- try $ do
       char '*' -- no space after
       name <- functionName
       lookAhead $ char '('
       pure name
     (rargs, wargs) <- braced $ do
-        rargs <- sepBy anyArument (symbol ",")
+        rargs <- sepBy readArument (symbol ",")
         symbol "/"
-        wargs <- sepBy argument (symbol ",")
+        wargs <- sepBy writeArgument (symbol ",")
         pure (rargs, wargs)
     pure $ FunctionCall name rargs wargs
     where
-        anyArument = try (fmap Right operand) <|> fmap Left complexName
-        -- try because of overlap between complex name and complex element
+        -- trys because of overlap between complex name and complex element
+        readArument = try (fmap Right operand) <|> fmap Left complexName
+        writeArgument = try (fmap Right identifier) <|> fmap Left complexName
 
 complexOperation :: Parser ComputeStatement
 complexOperation = choice
     [ symbol "+" *> liftA2 (ComplexUnary ":complex-create") complexName (braced operand)
     , symbol "-" *> complexNullary ":complex-delete"
     , symbol "%" *> complexNullary ":complex-shrink"
-    , symbol ">" *> complexNullary ":complex-push"
-    , symbol "<" *> complexNullary ":complex-pop"
+    , symbol ">" *> complexMaybeUnary ":complex-push"
+    , symbol "<" *> complexMaybeUnary ":complex-pop"
     , lookAhead (char '\'') *> complexString
     -- not implemented: @#, вставка и поп с произвольного индекса
     ]
   where
     complexNullary name = ComplexNullary name <$> complexName
+    complexMaybeUnary name = complexName >>= \complex ->
+        (lookAhead (char '.') *> fmap (ComplexUnary name complex) complexIndex)
+        <|> pure (ComplexNullary name complex)
     complexString = do
         str <- stringLiteral
         symbol ">"

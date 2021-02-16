@@ -2,55 +2,59 @@
 {-# LANGUAGE KindSignatures #-}
 {-# LANGUAGE PatternSynonyms, ViewPatterns #-}
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
-{-# OPTIONS_GHC -Wno-unused-imports #-}
+{-# LANGUAGE ScopedTypeVariables #-}
+{-# LANGUAGE ConstraintKinds #-}
 module Language.Lyapas.Interpret
     ( runProgram
     , runFunction
     , runParagraph
-    , InterpretError (..)
+    , InterpretError (..), Traceback
     ) where
 
 import Control.Exception (Exception)
 import Control.Monad (void, when)
-import Control.Monad.Catch (throwM)
+import Control.Monad.Catch (MonadThrow, throwM)
 import Control.Monad.Except (ExceptT (..), runExceptT)
-import Control.Monad.IO.Class (liftIO)
-import Control.Monad.Reader (ReaderT, runReaderT, reader)
+import Control.Monad.IO.Class (MonadIO, liftIO)
+import Control.Monad.Reader (MonadReader, ReaderT, runReaderT)
 import Control.Monad.State.Strict (StateT, runStateT)
 import Control.Monad.Trans.Class (lift)
-import Data.Bits (shiftL, shiftR, (.|.), (.&.), testBit, countTrailingZeros, finiteBitSize, complement, popCount, xor, clearBit)
+import Data.Bits (shiftL, shiftR, (.|.), (.&.), countTrailingZeros, finiteBitSize, complement, popCount, xor, clearBit)
 import Data.ByteString (ByteString)
 import Data.Containers (mapFromList, lookup, insertMap, member, deleteMap)
 import Data.HashMap.Strict (HashMap)
 import Data.Int (Int64)
-import Data.MonoTraversable (olength, olength64, Element)
-import Data.Sequences (index, fromList, IsSequence, Index, take, snoc)
+import Data.MonoTraversable (olength, olength64, Element, opoint)
+import Data.Sequences (index, fromList, IsSequence, Index, take, snoc, unsnoc, splitAt, uncons)
 import Data.Text (Text, pack, unpack)
 import Data.Text.Encoding (encodeUtf8)
 import Data.Vector.Storable (Vector)
 import Optics.At () -- instances for bytestrings and vectors and hashmaps
-import Optics.Core (at, ix, (%), (&), (.~), (^?), _1, _2) -- orphans for bytestrings and vectors
+import Optics.Core (at, ix, (%), (^?), (^.), _1, _2, over) -- orphans for bytestrings and vectors
 import Optics.Lens (Lens')
-import Optics.State (use, preuse)
+import Optics.State (use, preuse, assign)
 import Optics.State.Operators ((%=), (.=))
 import Optics.TH (makeLenses)
 import System.Clock (Clock (Realtime), getTime, sec)
 import System.Random (randomIO, setStdGen, mkStdGen)
 
 import qualified Control.Monad.State.Strict as State
+import qualified Control.Monad.Reader as Reader
 import qualified Data.ByteString.Char8 as B8
 import qualified Data.Text.IO as TIO
 
 import Language.Lyapas.Syntax
-import Prelude hiding (lookup, take)
+import Prelude hiding (lookup, take, splitAt, drop)
 
+
+type OpType = Int64
 
 data FunctionState = FunctionState
-    { _tau :: Int64
-    , _vars :: HashMap VarName Int64
-    , _longs :: HashMap ComplexIdentifier ((Vector Int64), Int) -- ^ snd is capacity
+    { _tau :: OpType
+    , _vars :: HashMap VarName OpType
+    , _longs :: HashMap ComplexIdentifier ((Vector OpType), Int) -- ^ snd is capacity
     , _shorts :: HashMap ComplexIdentifier (ByteString, Int) -- ^ snd is capacity
-    , _overflow :: Int64
+    , _overflow :: OpType
     } deriving (Eq, Show)
 makeLenses ''FunctionState
 
@@ -63,75 +67,117 @@ emptyState = FunctionState
     , _overflow = 0
     }
 
-type ProgramFunctions = [Function]
+type Traceback = [FunctionName]
 
-type LyapasT m = StateT FunctionState (ReaderT ProgramFunctions m)
+data ExecutionState = ExecutionState
+    { _programFunctions :: [Function]
+    , _traceback :: Traceback
+    } deriving (Eq, Show)
+makeLenses ''ExecutionState
+
+type LyapasT m =
+    StateT FunctionState -- local stackframe
+    (ReaderT ExecutionState m)
+
+trace :: Monad m => FunctionName -> LyapasT m a -> LyapasT m a
+trace name = Reader.local $ over traceback ((:) name)
+
+throwT :: (MonadThrow m, MonadReader ExecutionState m)
+       => (Traceback -> InterpretError) -> m a
+throwT err = do
+    s <- Reader.ask
+    throwM . err $ s ^. traceback
+
+type LyapasThrow m = (MonadThrow m, MonadReader ExecutionState m)
 
 data InterpretError
-    = NotFound Text
-    | TypeError Text
-    | IndexError Text
-    | NameError Text
-    | NotImplemented Text
+    = NotFound Text Traceback
+    | TypeError Text Traceback
+    | IndexError Text Traceback
+    | NameError Text Traceback
+    | ValueError Text Traceback
+    | NotImplemented Text Traceback
     deriving (Eq, Show)
 instance Exception InterpretError
+
+getFunction :: (Monad m, MonadReader ExecutionState m)
+            => FunctionName -> m (Maybe Function)
+getFunction name = do
+    s <- Reader.ask
+    case filter ((== name) . functionName) $ s ^. programFunctions of
+        [] -> pure Nothing
+        x:_ -> pure . Just $ x
 
 
 runProgram :: Program -> IO ()
 runProgram (Program funcs) = do
-    func <- case funcs of
-        [] -> throwM . NotFound $ "Program has no functions to run"
-        (Function _ [] [] body):_ -> pure body
-        (Function (FunctionName name) _ _ _):_ -> throwM . TypeError $
+    (func, name) <- case funcs of
+        [] -> pure ([], FunctionName "")
+        (Function name [] [] body):_ -> pure (body, name)
+        (Function (FunctionName name) _ _ _):_ -> throwM . flip TypeError [] $
             "Function " <> name <> " (first function in program) should have no arguments"
-    void $ runReaderT (runStateT (runFunction func) emptyState) funcs
+    let execState = ExecutionState
+            { _traceback = [name]
+            , _programFunctions = funcs
+            }
+    void $ runReaderT (runStateT (runFunction func) emptyState) execState
 
 -- | Prepare new "stack frame" for function, run it, and update outer stack
 -- frame on exit
 callFunction
     :: FunctionName
     -> [Either ComplexName Operand]
-    -> [Argument]
+    -> [Either ComplexName Identifier]
     -> LyapasT IO ()
-callFunction name rargs wargs = reader ( filter ((== name) . functionName) ) >>= \case
-    [] -> throwM . NameError $ tshow name <> " not found"
-    (Function _ frargs fwargs body):_ -> do
+callFunction name rargs wargs = getFunction name >>= \case
+    Nothing -> throwT . NameError $ tshow name <> " not found"
+    Just (Function _ frargs fwargs body) -> do
         when (olength rargs /= olength frargs || olength wargs /= olength fwargs) $
-            throwM . TypeError $ "Incorrect amount of arguments"
+            throwT . TypeError $ "Incorrect amount of arguments"
         s <- State.get
         State.put emptyState
-        mapM_ (uncurry $ copyRArgFromTo s) $ zip rargs frargs
-        mapM_ (uncurry $ copyWArgFromTo s) $ zip wargs fwargs
-        runFunction body
+        mapM_ (uncurry $ copyRArgFrom s) $ zip rargs frargs
+        mapM_ (uncurry $ copyWArgFrom s) $ zip wargs fwargs
+        trace name $ runFunction body
         finishState <- State.get
         State.put s
-        mapM_ (uncurry $ copyWArgFromTo finishState) $ zip fwargs wargs -- order!
+        mapM_ (uncurry $ returnWargFrom finishState) $ zip fwargs wargs -- order!
     where
-        copyWArgFromTo s (ArgVar source) (ArgVar dest) = copy s vars source dest
-        copyWArgFromTo s (ArgComplex (LongComplex source)) (ArgComplex (LongComplex dest)) =
+        copyWArgFrom s (Left (LongComplex source)) (ArgComplex (LongComplex dest)) =
             copy s longs source dest
-        copyWArgFromTo s (ArgComplex (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
+        copyWArgFrom s (Left (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
             copy s shorts source dest
-        copyWArgFromTo _ source dest = throwM . TypeError $
-            "Mismatch between " <> tshow source <> " and " <> tshow dest
-        --
-        copyRArgFromTo s (Left (LongComplex source)) (ArgComplex (LongComplex dest)) =
-            copy s longs source dest
-        copyRArgFromTo s (Left (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
-            copy s shorts source dest
-        copyRArgFromTo s (Right op) (ArgVar dest) = do
-            oldState <- State.get
-            State.put s
-            source <- getOperand op
-            State.put oldState
+        copyWArgFrom s (Right ident) (ArgVar dest) = do
+            source <- getIdentifierIn s ident
             vars % at dest .= Just source
-        copyRArgFromTo _ source dest = throwM . TypeError $
+        copyWArgFrom _ source dest = throwT . TypeError $
             "Mismatch between " <> tshow source <> " and " <> tshow dest
         --
-        copy s lens source dest = case s ^? lens % at source of -- XXX look at this carefully
+        copyRArgFrom s (Left (LongComplex source)) (ArgComplex (LongComplex dest)) =
+            copy s longs source dest
+        copyRArgFrom s (Left (ShortComplex source)) (ArgComplex (ShortComplex dest)) =
+            copy s shorts source dest
+        copyRArgFrom s (Right op) (ArgVar dest) = do
+            source <- getOperandIn s op
+            vars % at dest .= Just source
+        copyRArgFrom _ source dest = throwT . TypeError $
+            "Mismatch between " <> tshow source <> " and " <> tshow dest
+        --
+        returnWargFrom s (ArgComplex (LongComplex source)) (Left (LongComplex dest)) =
+            copy s longs source dest
+        returnWargFrom s (ArgComplex (ShortComplex source)) (Left (ShortComplex dest)) =
+            copy s shorts source dest
+        returnWargFrom s (ArgVar var) (Right dest) =
+            case s ^? vars % ix var of
+                Nothing -> throwT . NameError $ "Internal function call error"
+                Just source -> setIdentifier dest source
+        returnWargFrom _ source dest = throwT . TypeError $
+            "Mismatch between " <> tshow source <> " and " <> tshow dest
+        --
+        copy s lens source dest = case s ^. lens % at source of
             Nothing -> do
-                throwM . NameError $ "Bad function call mapping " <> tshow source <> " to " <> tshow dest <> "\nin " <> tshow s
-            Just x -> lens % at dest .= x
+                throwT . NameError $ "Bad function call mapping " <> tshow source <> " to " <> tshow dest <> "\nin " <> tshow s
+            Just x -> lens % at dest .= Just x
 
 
 -- | Run function in current "stack frame"
@@ -143,7 +189,7 @@ runFunction allParagraphs = go allParagraphs where
         Nothing -> go ps
         Just jumpTo ->
             case dropWhile ((/= jumpTo) . paragraphName) allParagraphs of
-                [] -> throwM . NotFound $ "Paragraph " <> tshow jumpTo <> " does not exist"
+                [] -> throwT . NotFound $ "Paragraph " <> tshow jumpTo <> " does not exist"
                 ps' -> go ps'
     paragraphName (Paragraph name _) = name
 
@@ -224,8 +270,8 @@ runCompute = \case
     Unary (OP":add") op -> unary op (+)
     Unary (OP":sub") op -> unary op (-)
     Unary (OP":mul") op -> unary op (*)
-    Unary (OP":div") op -> unary op div
-    Unary (OP":mod") op -> unary op mod
+    Unary (OP":div") op -> unaryDivMod op tau overflow
+    Unary (OP":mod") op -> unaryDivMod op overflow tau
     Unary (OP":inc") op -> unarySet op (\_t old -> old + 1)
     Unary (OP":dec") op -> unarySet op (\_t old -> old - 1)
     --
@@ -233,6 +279,14 @@ runCompute = \case
     ComplexNullary (OP":complex-delete") comp -> complexDelete comp
     ComplexNullary (OP":complex-shrink") comp -> complexShrink comp
     ComplexNullary (OP":complex-push") comp -> use tau >>= complexPush comp
+    ComplexNullary (OP":complex-pop") comp -> complexPop comp >>= assign tau
+    ComplexUnary (OP":complex-push") comp op -> do
+        t <- use tau
+        i <- getOperand op
+        complexPushAt i comp t
+    ComplexUnary (OP":complex-pop") comp op -> do
+        i <- getOperand op
+        complexPopAt i comp >>= assign tau
     ComplexNullary (OP":set-null") comp -> complexSetNull comp
     ComplexNullary (OP":complex-print") comp -> complexPrint comp
     ComplexNullary (OP":complex-read") comp -> complexRead comp
@@ -240,98 +294,111 @@ runCompute = \case
     --
     FunctionCall name rargs wargs -> callFunction name rargs wargs
     --
-    other -> throwM . NotImplemented . tshow $ other
+    other -> throwT . NotImplemented . tshow $ other
     where
-        nullary :: (Int64 -> Int64) -> LyapasT IO ()
+        nullary :: (OpType -> OpType) -> LyapasT IO ()
         nullary op = tau %= op
         --
         create :: Operand -> LyapasT IO ()
         create (MutableOperand ident@(IdentVar _)) = setIdentifier ident 0
         create _ = pure () -- either they implicitly exist, or will throw non-mutable error later
         --
-        unarySet, unary :: Operand -> (Int64 -> Int64 -> Int64) -> LyapasT IO ()
+        unarySet, unary :: Operand -> (OpType -> OpType -> OpType) -> LyapasT IO ()
         unarySet (MutableOperand ident) f = do
             t <- use tau
             i <- getIdentifier ident
             setIdentifier ident (f t i)
-        unarySet op _ = throwM . TypeError $
+        unarySet op _ = throwT . TypeError $
             tshow op <> " is not a mutable operand"
         unary op f = do
             t <- use tau
             x <- getOperand op
             tau .= f t x
+        unaryDivMod op division modulo = do
+            t <- use tau
+            x <- getOperand op
+            let (d, m) = t `divMod` x
+            division .= d
+            modulo .= m
 
-debugState :: LyapasT IO ()
-debugState = do
-    s <- State.get
-    liftIO . putStrLn $ "#debug state:" <> show s
-
-getOperand :: Operand -> LyapasT IO Int64
-getOperand = \case
-    MutableOperand ident -> getIdentifier ident
+getOperandIn
+    :: (LyapasThrow m, MonadIO m)
+    => FunctionState -> Operand -> m OpType
+getOperandIn st = \case
+    MutableOperand ident -> getIdentifierIn st ident
     Constant x -> pure x
-    OverflowValue -> use overflow
+    OverflowValue -> pure $ st ^. overflow
     TimeValue -> liftIO $ sec <$> getTime Realtime
     UnitVector var -> do
-        shift <- getVar var
+        shift <- getVarIn st var
         pure $ 1 `shiftL` fromIntegral shift
 
-getIdentifier :: Identifier -> LyapasT IO Int64
-getIdentifier = \case
-    IdentVar v -> getVar v
-    IdentComplexSize name -> do
-        s <- use shorts
-        l <- use longs
-        case (lookup name s, lookup name l) of
+getOperand :: Operand -> LyapasT IO OpType
+getOperand op = State.get >>= flip getOperandIn op
+
+getIdentifierIn
+    :: forall m. (LyapasThrow m, MonadIO m)
+    => FunctionState -> Identifier -> m OpType
+getIdentifierIn st = \case
+    IdentVar v -> getVarIn st v
+    IdentComplexSize name ->
+        case (st ^? shorts % ix name, st ^? longs % ix name) of
             (Just (v, _), _) -> pure . olength64 $ v
             (_, Just (v, _)) -> pure . olength64 $ v
             (Nothing, Nothing) ->
-                throwM . NotFound $ "Using " <> tshow name <> " before creation"
-    IdentComplexCap name -> do
-        s <- use shorts
-        l <- use longs
-        case (lookup name s, lookup name l) of
+                throwT . NotFound $ "Using " <> tshow name <> " before creation"
+    IdentComplexCap name ->
+        case (st ^? shorts % ix name, st ^? longs % ix name) of
             (Just (_, x), _) -> pure . fromIntegral $ x
             (_, Just (_, x)) -> pure . fromIntegral $ x
             (Nothing, Nothing) ->
-                throwM . NotFound $ "Using " <> tshow name <> " before creation"
+                throwT . NotFound $ "Using " <> tshow name <> " before creation"
     IdentComplexElement (LongComplex name) op -> do
-        ind <- fromIntegral <$> getOperand op
-        (vec, _cap) <- getLongComplex name
+        ind <- fromIntegral <$> getOperandIn st op
+        (vec, _cap) <- getLongComplexIn st name
         indexGeneric vec ind
     IdentComplexElement (ShortComplex name) op -> do
-        ind <- fromIntegral <$> getOperand op
-        (bs, _cap) <- getShortComplex name
+        ind <- fromIntegral <$> getOperandIn st op
+        (bs, _cap) <- getShortComplexIn st name
         fromIntegral <$> indexGeneric bs ind
     where
-        indexGeneric :: IsSequence seq => seq -> Index seq -> LyapasT IO (Element seq)
+        indexGeneric :: (IsSequence seq) => seq -> Index seq -> m (Element seq)
         indexGeneric v i = case index v i of
-            Nothing -> throwM . IndexError $ "Complex index out of range"
+            Nothing -> throwT . IndexError $ "Complex index out of range"
             Just x -> pure x
 
-getVar :: VarName -> LyapasT IO Int64
-getVar (VarName "X") = liftIO randomIO
-getVar name = do
-    v <- use vars
-    case lookup name v of
-        Nothing -> throwM . NotFound $ "Using " <> tshow name <> " before assigning"
+getIdentifier :: Identifier -> LyapasT IO OpType
+getIdentifier i = State.get >>= flip getIdentifierIn i
+
+getVarIn :: (LyapasThrow m, MonadIO m) => FunctionState -> VarName -> m OpType
+getVarIn _st (VarName "X") = liftIO randomIO
+getVarIn st name =
+    case st ^? vars % ix name of
+        Nothing -> throwT . NotFound $ "Using " <> tshow name <> " before assigning"
         Just x -> pure x
 
-getLongComplex :: ComplexIdentifier -> LyapasT IO (Vector Int64, Int)
-getLongComplex name = do
-    v <- use longs
-    case lookup name v of
-        Nothing -> throwM . NotFound $ "Using " <> tshow name <> " before creation"
+getVar :: VarName -> LyapasT IO OpType
+getVar name = State.get >>= flip getVarIn name
+
+getLongComplexIn :: LyapasThrow m => FunctionState -> ComplexIdentifier -> m (Vector OpType, Int)
+getLongComplexIn st name =
+    case st ^? longs % ix name of
+        Nothing -> throwT . NotFound $ "Using " <> tshow name <> " before creation"
+        Just x -> pure x
+
+getLongComplex :: ComplexIdentifier -> LyapasT IO (Vector OpType, Int)
+getLongComplex name = State.get >>= flip getLongComplexIn name
+
+getShortComplexIn :: LyapasThrow m => FunctionState -> ComplexIdentifier -> m (ByteString, Int)
+getShortComplexIn st name =
+    case st ^? shorts % ix name of
+        Nothing -> throwT . NotFound $ "Using " <> tshow name <> " before creation"
         Just x -> pure x
 
 getShortComplex :: ComplexIdentifier -> LyapasT IO (ByteString, Int)
-getShortComplex name = do
-    v <- use shorts
-    case lookup name v of
-        Nothing -> throwM . NotFound $ "Using " <> tshow name <> " before creation"
-        Just x -> pure x
+getShortComplex name = State.get >>= flip getShortComplexIn name
 
-setIdentifier :: Identifier -> Int64 -> LyapasT IO ()
+setIdentifier :: Identifier -> OpType -> LyapasT IO ()
 setIdentifier i value = case i of
     IdentVar name -> do
         if name == VarName "X"
@@ -341,13 +408,13 @@ setIdentifier i value = case i of
         ind <- fromIntegral <$> getOperand op
         (comp, _) <- getShortComplex name
         when (ind >= olength comp) $
-            throwM . IndexError $ "Indexing " <> tshow name <> " beyond size at " <> tshow ind
+            throwT . IndexError $ "Indexing " <> tshow name <> " beyond size at " <> tshow ind
         shorts % ix name % _1 % ix ind .= fromIntegral value
     IdentComplexElement (LongComplex name) op -> do
         ind <- fromIntegral <$> getOperand op
         (comp, _) <- getLongComplex name
         when (ind >= olength comp) $
-            throwM . IndexError $ "Indexing " <> tshow name <> " beyond size at " <> tshow ind
+            throwT . IndexError $ "Indexing " <> tshow name <> " beyond size at " <> tshow ind
         longs % ix name % _1 % ix ind .= value
     IdentComplexSize name -> do
         s <- use shorts
@@ -358,7 +425,7 @@ setIdentifier i value = case i of
             (_, True) ->
                 complexSetSize longs name (fromIntegral value)
             (False, False) ->
-                throwM . NotFound $ "Using " <> tshow name <> " before creation"
+                throwT . NotFound $ "Using " <> tshow name <> " before creation"
     IdentComplexCap name -> do
         let cap = fromIntegral value
         s <- use shorts
@@ -371,19 +438,19 @@ setIdentifier i value = case i of
                 when (olength v > cap) $ complexSetSize longs name cap
                 longs % ix name % _2 .= cap
             (Nothing, Nothing) ->
-                throwM . NotFound $ "Using " <> tshow name <> " before creation"
+                throwT . NotFound $ "Using " <> tshow name <> " before creation"
 
-complexCreate :: ComplexName -> Int64 -> LyapasT IO ()
+complexCreate :: ComplexName -> OpType -> LyapasT IO ()
 complexCreate (LongComplex name) cap = do
     exists <- complexExists name
     if exists
-     then throwM . NameError $ tshow name <> " already exists"
+     then throwT . NameError $ tshow name <> " already exists"
      else pure ()
     longs %= insertMap name (fromList [], fromIntegral cap)
 complexCreate (ShortComplex name) cap = do
     exists <- complexExists name
     if exists
-     then throwM . NameError $ tshow name <> " already exists"
+     then throwT . NameError $ tshow name <> " already exists"
      else pure ()
     shorts %= insertMap name (fromList [], fromIntegral cap)
 
@@ -398,9 +465,9 @@ complexSetSize
     -> ComplexIdentifier -> Index vec -> LyapasT IO ()
 complexSetSize complexes name size = do
     (vec, cap) <- preuse (complexes % ix name) >>= \case
-        Nothing -> throwM . NameError $ tshow name <> " does not exist"
+        Nothing -> throwT . NameError $ tshow name <> " does not exist"
         Just x -> pure x
-    when (size > cap) $ throwM . IndexError $ tshow name <> " doesn't have enough capacity"
+    when (size > cap) $ throwT . IndexError $ tshow name <> " doesn't have enough capacity"
     let oldSize = olength vec
     if oldSize >= size
         then complexes % ix name % _1 %= take size
@@ -412,20 +479,66 @@ complexShrink n = ensureComplexExists n >> case n of
     LongComplex  name -> longs  % ix name %= \(v, _) -> (v, olength v)
     ShortComplex name -> shorts % ix name %= \(v, _) -> (v, olength v)
 
-complexPush :: ComplexName -> Int64 -> LyapasT IO ()
-complexPush n val = ensureComplexExists n >> case n of
-    LongComplex name -> do
-        (vec, cap) <- preuse (longs % ix name) -- handle impossible lens failure
-            >>= \case {Just x -> pure x; Nothing -> error "unreachable"}
+complexPush :: ComplexName -> OpType -> LyapasT IO ()
+complexPush n val = getComplex n >>= \case
+    (Left (vec, cap), name) ->
         if olength vec >= cap
-            then throwM . IndexError $ "Can't push into " <> tshow name <> ": too small"
+            then throwT . ValueError $ "Can't push into " <> tshow name <> ": too small"
             else longs % ix name % _1 %= flip snoc val
-    ShortComplex name -> do
-        (vec, cap) <- preuse (shorts % ix name) -- handle impossible lens failure
-            >>= \case {Just x -> pure x; Nothing -> error "unreachable"}
+    (Right (vec, cap), name) ->
         if olength vec >= cap
-            then throwM . IndexError $ "Can't push into " <> tshow name <> ": too small"
+            then throwT . ValueError $ "Can't push into " <> tshow name <> ": too small"
             else shorts % ix name % _1 %= flip snoc (fromIntegral val)
+
+complexPop :: ComplexName -> LyapasT IO OpType
+complexPop n = getComplex n >>= \case
+    (Left (vec, _), name) -> case unsnoc vec of
+        Nothing -> throwT . ValueError $ "Can't pop from empty " <> tshow name
+        Just (vec', x) -> do
+            longs % ix name % _1 .= vec'
+            pure x
+    (Right (bs, _), name) -> case unsnoc bs of
+        Nothing -> throwT . ValueError $ "Can't pop from empty " <> tshow name
+        Just (bs', x) -> do
+            shorts % ix name % _1 .= bs'
+            pure . fromIntegral $ x
+
+complexPushAt :: OpType -> ComplexName -> OpType -> LyapasT IO ()
+complexPushAt ind n val = getComplex n >>= \case
+    (Left (vec, cap), name) -> do
+        checkCap vec cap name
+        longs % ix name % _1 .= genericPushAt (fromIntegral ind) vec val
+    (Right (bs, cap), name) -> do
+        checkCap bs cap name
+        shorts % ix name % _1 .= genericPushAt (fromIntegral ind) bs (fromIntegral val)
+    where
+        checkCap :: IsSequence seq => seq -> Int -> ComplexIdentifier -> LyapasT IO ()
+        checkCap v cap name = if olength v >= cap
+            then throwT . ValueError $ "Can't push into " <> tshow name <> ": too small"
+            else pure ()
+        genericPushAt :: IsSequence seq => Index seq -> seq -> Element seq -> seq
+        genericPushAt i v x =
+            let (begin, end) = splitAt i v
+            in begin <> opoint x <> end
+
+complexPopAt :: OpType -> ComplexName -> LyapasT IO OpType
+complexPopAt ind n = getComplex n >>= \case
+    (Left (vec, _), name) -> do
+        (x, vec') <- genericPopAt (fromIntegral ind) vec
+        longs % ix name % _1 .= vec'
+        pure x
+    (Right (bs, _), name) -> do
+        (x, bs') <- genericPopAt (fromIntegral ind) bs
+        shorts % ix name % _1 .= bs'
+        pure . fromIntegral $ x
+    where
+        genericPopAt :: IsSequence seq => Index seq -> seq -> LyapasT IO (Element seq, seq)
+        genericPopAt i v =
+            let (begin, end) = splitAt i v
+            in case uncons end of
+                Just (x, end') -> pure (x, begin <> end')
+                Nothing -> throwT . ValueError $
+                    "Can't pop from empty " <> tshow n
 
 complexSetNull :: ComplexName -> LyapasT IO ()
 complexSetNull n = ensureComplexExists n >> case n of
@@ -437,32 +550,32 @@ complexSetNull n = ensureComplexExists n >> case n of
 complexPrint :: ComplexName -> LyapasT IO ()
 complexPrint (ShortComplex name) = do
     preuse (shorts % ix name) >>= \case
-        Nothing -> throwM . NameError $ tshow name <> " does not exist"
+        Nothing -> throwT . NameError $ tshow name <> " does not exist"
         Just (bs, _) -> liftIO . B8.putStr $ bs
-complexPrint (LongComplex name) = throwM . TypeError $
+complexPrint (LongComplex name) = throwT . TypeError $
     "Can't print long complex " <> tshow name
 
 complexRead :: ComplexName -> LyapasT IO ()
 complexRead (ShortComplex name) = preuse (shorts % ix name) >>= \case
-    Nothing -> throwM . NameError $ tshow name <> " does not exist"
+    Nothing -> throwT . NameError $ tshow name <> " does not exist"
     Just (old, cap) -> do
         new <- encodeUtf8 <$> liftIO TIO.getLine
         when (olength old + olength new > cap) $
-            throwM . IndexError $ tshow name <> " is not big enough for append"
+            throwT . IndexError $ tshow name <> " is not big enough for append"
         shorts % ix name % _1 .= old <> new
 complexRead (LongComplex name) =
-    throwM . TypeError $ tshow name <> " is not a byte complex"
+    throwT . TypeError $ tshow name <> " is not a byte complex"
 
 complexAppend :: ComplexName -> StringLiteral -> LyapasT IO ()
 complexAppend (ShortComplex name) (StringLiteral text) = preuse (shorts % ix name) >>= \case
-    Nothing -> throwM . NameError $ tshow name <> " does not exist"
+    Nothing -> throwT . NameError $ tshow name <> " does not exist"
     Just (old, cap) -> do
         let new = encodeUtf8 text
         when (olength old + olength new > cap) $
-            throwM . IndexError $ tshow name <> " is not big enough for append"
+            throwT . IndexError $ tshow name <> " is not big enough for append"
         shorts % ix name % _1 .= old <> new
 complexAppend (LongComplex name) _ =
-    throwM . TypeError $ tshow name <> " is not a byte complex"
+    throwT . TypeError $ tshow name <> " is not a byte complex"
 
 complexExists :: ComplexIdentifier -> LyapasT IO Bool
 complexExists name = do
@@ -474,16 +587,17 @@ complexExists name = do
         pure $ member name l
 
 ensureComplexExists :: ComplexName -> LyapasT IO ()
-ensureComplexExists (LongComplex name) = do
-    s <- use longs
-    if member name s
-        then pure ()
-        else throwM . NameError $ tshow name <> " does not exist"
-ensureComplexExists (ShortComplex name) = do
-    s <- use shorts
-    if member name s
-        then pure ()
-        else throwM . NameError $ tshow name <> " does not exist"
+ensureComplexExists = void . getComplex
+
+getComplex :: ComplexName -> LyapasT IO (Either (Vector OpType, Int) (ByteString, Int), ComplexIdentifier)
+getComplex (LongComplex name) =
+    preuse (longs % ix name) >>= \case
+        Just x -> pure (Left x, name)
+        Nothing -> throwT . NameError $ tshow name <> " does not exist"
+getComplex (ShortComplex name) =
+    preuse (shorts % ix name) >>= \case
+        Just x -> pure (Right x, name)
+        Nothing -> throwT . NameError $ tshow name <> " does not exist"
 
 
 tshow :: Show a => a -> Text
@@ -494,6 +608,11 @@ unOperatorName (OperatorName n) = n
 
 functionName :: Function -> FunctionName
 functionName (Function x _ _ _) = x
+
+debugState :: LyapasT IO ()
+debugState = do
+    s <- State.get
+    liftIO . putStrLn $ "#debug state:" <> show s
 
 pattern OP :: String -> OperatorName
 pattern OP str <- (unpack . unOperatorName -> str)
