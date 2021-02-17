@@ -1,15 +1,16 @@
+{-# LANGUAGE TupleSections #-}
 module Main where
 
-import Control.Monad.Catch (handle)
+import Control.Monad.Catch (handle, try, displayException)
 import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.State.Strict (execStateT)
-import Data.Text (pack, unpack, strip)
-import Language.Lyapas.Interpret (_tau, ExecutionState (..), runFunction, emptyState, InterpretError (..))
+import Data.Text (Text, pack, unpack, strip)
+import Language.Lyapas.Interpret (_tau, FunctionState (..), ExecutionState (..), runFunction, emptyState, InterpretError (..))
 import Language.Lyapas.Parse (functionBody, program)
-import Language.Lyapas.Syntax (Program (..), FunctionName (..))
+import Language.Lyapas.Syntax (Program (..), FunctionName (..), pretty)
 import Language.Lyapas.Test (execFile)
-import System.Console.Haskeline (runInputT, defaultSettings, getInputLine, outputStr)
+import System.Console.Haskeline (InputT, runInputT, defaultSettings, getInputLine, outputStr, outputStrLn)
 import System.Environment (getArgs)
 import Text.Megaparsec (parse, errorBundlePretty)
 
@@ -32,42 +33,25 @@ runInteractive =
     >> runInputT defaultSettings (loop toplevelState toplevelReader)
     where
         loop tlState tlReader = getInputLine ">>> " >>= \case
-            Nothing -> outputStr "goodbye\n"
+            Nothing -> outputStrLn "goodbye"
             Just (':':cmd) -> do
                 (tlState', tlReader') <- runCmd cmd tlState tlReader
                 loop tlState' tlReader'
             Just line -> do
-                (tlState', tlReader') <- runLyapas line tlState tlReader
-                loop tlState' tlReader'
-        --
-        runLyapas line tlState tlReader = case parse functionBody "INPUT" (pack line) of
-            Left err -> do
-                outputStr . errorBundlePretty $ err
-                pure (tlState, tlReader)
-            Right body -> do
-                tlState' <- liftIO $ handle (interpretError tlState) $
-                    runReaderT (execStateT (runFunction body) tlState) tlReader
-                outputStr $ "τ = " <> show (_tau tlState') <> "\n"
-                pure (tlState', tlReader)
-        --
-        runCmd ('l':'o':'a':'d':' ':file') s r = do
-            let file = unpack . strip . pack $ file'
-            outputStr $ "Opening '" <> file <> "'\n"
-            text <- liftIO $ TIO.readFile file
-            case parse program file text of
-                Left err -> do
-                    outputStr . errorBundlePretty $ err
-                    pure (s, r)
-                Right (Program funcs) ->
-                    let oldFuncs = _programFunctions r
-                        r' = r {_programFunctions = oldFuncs <> funcs}
-                    in outputStr "ok\n" >> pure (s, r')
-        runCmd _any s r = do
-            outputStr $ "Available commands:"
-                <> "\n  :help - display this message"
-                <> "\n  :load FILE - load functions from file"
-                <> "\n"
-            pure (s, r)
+                tlState' <- runLyapas (pack line) tlState tlReader
+                loop tlState' tlReader
+
+runLyapas :: Text -> FunctionState -> ExecutionState -> InputT IO FunctionState
+runLyapas line tlState tlReader = case parse functionBody "INPUT" line of
+    Left err -> do
+        outputStr . errorBundlePretty $ err
+        pure tlState
+    Right body -> do
+        tlState' <- liftIO $ handle (interpretError tlState) $
+            runReaderT (execStateT (runFunction body) tlState) tlReader
+        outputStrLn $ "τ = " <> show (_tau tlState')
+        pure tlState'
+    where
         interpretError x err =
             let (text, trace) = case err of
                     NotFound s t -> ("NotFound: " <> s, t)
@@ -82,3 +66,36 @@ runInteractive =
             putTrace ns
         putTrace [] = pure ()
 
+
+runCmd :: String -> FunctionState -> ExecutionState -> InputT IO (FunctionState, ExecutionState)
+runCmd ('l':'o':'a':'d':' ':file) s r = (s,) <$> loadFile r file
+runCmd ('l':' ':file) s r = (s,) <$> loadFile r file
+runCmd ("list") s r = listFunctions r >> pure (s, r)
+runCmd _any s r = do
+    outputStr $ "Available commands:"
+        <> "\n  :help - display this message"
+        <> "\n  :load FILE - load functions from file"
+        <> "\n  :l FILE - shorthand for :load"
+        <> "\n  :list - list all available functions"
+        <> "\n"
+    pure (s, r)
+
+loadFile :: ExecutionState -> FilePath -> InputT IO ExecutionState
+loadFile r file' =
+    let file = unpack . strip . pack $ file'
+    in (liftIO . try . TIO.readFile $ file) >>= \case
+        Left e -> do
+            outputStrLn $ "Loading failed: " <> displayException (e :: IOError)
+            pure r
+        Right text -> case parse program file text of
+            Left err -> do
+                outputStr . errorBundlePretty $ err
+                pure r
+            Right (Program funcs) ->
+                let oldFuncs = _programFunctions r
+                    r' = r {_programFunctions = oldFuncs <> funcs}
+                in outputStrLn "ok" >> pure r'
+
+listFunctions :: ExecutionState -> InputT IO ()
+listFunctions ExecutionState {_programFunctions} =
+    mapM_ (outputStrLn . unpack . pretty) _programFunctions

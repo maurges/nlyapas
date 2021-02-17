@@ -15,7 +15,7 @@ description:
 
 ghc-options:
 - -Wall -Wcompat
-default-extensions: OverloadedStrings LambdaCase BangPatterns
+default-extensions: OverloadedStrings LambdaCase BangPatterns NamedFieldPuns
 
 library:
   source-dirs:         src
@@ -54,5 +54,4 @@ executables:
     - language-lyapas
     - megaparsec >= 9.0.0
     - mtl
-    - transformers
     - text

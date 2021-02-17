@@ -152,3 +152,27 @@ instance Default ExtFunctionParams where
 instance Default VariableSize where
     def = Unsigned32 -- FIXME: i'm not sure here
 -}
+
+
+--------------------------------------------------------------
+-- Class for pretty printing syntax elements in error messages
+
+
+class Pretty a where
+    pretty :: a -> Text
+
+instance Pretty Function where
+    pretty (Function (FunctionName name) rargs wargs _) =
+        name <> "("
+        <> sepBy ", " (map pretty rargs) <> " / "
+        <> sepBy ", " (map pretty wargs)
+        <> ")"
+        where
+            sepBy _sep [] = ""
+            sepBy _sep [x] = x
+            sepBy sep (x:xs) = x <> sep <> sepBy sep xs
+
+instance Pretty Argument where
+    pretty (ArgVar (VarName name)) = name
+    pretty (ArgComplex (ShortComplex (ComplexIdentifier ident))) = "F" <> ident
+    pretty (ArgComplex (LongComplex (ComplexIdentifier ident))) = "L" <> ident
