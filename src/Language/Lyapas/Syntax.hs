@@ -1,29 +1,31 @@
 {-# LANGUAGE GeneralizedNewtypeDeriving #-}
+{-# LANGUAGE PatternSynonyms, ViewPatterns #-}
 module Language.Lyapas.Syntax where
 
 import Data.Hashable (Hashable)
 import Data.Int (Int64)
 import Data.String (IsString)
 import Data.Text (Text)
+import Data.Sequences (unpack, pack)
 
 
 data Program = Program [Function]
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Function = Function FunctionName
                          [Argument] -- ^ Pass by value
                          [Argument] -- ^ Pass by reference
                          [Paragraph] -- ^ First (unnamed) paragraph has special name
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Argument = ArgVar VarName | ArgComplex ComplexName
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Paragraph = Paragraph ParagraphName [Statement]
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Statement = Compute ComputeStatement | Control ControlStatement
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data ComputeStatement
     = SetTau Operand
@@ -36,7 +38,7 @@ data ComputeStatement
     | ComplexSymbols OperatorName ComplexName StringLiteral
     | StringLiteralStatement OperatorName StringLiteral
     | FunctionCall FunctionName [Either ComplexName Operand] [Either ComplexName Identifier]
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data ControlStatement
     = Goto ParagraphName
@@ -45,7 +47,7 @@ data ControlStatement
     | GoCondition Condition ParagraphName
     | GoEnumerateZeros ParagraphName Identifier Identifier
     -- переход по времени?
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Operand
     = Constant Int64
@@ -53,17 +55,17 @@ data Operand
     | TimeValue
     | UnitVector VarName
     | MutableOperand Identifier
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Identifier
     = IdentVar VarName
     | IdentComplexElement ComplexName Operand
     | IdentComplexSize ComplexIdentifier
     | IdentComplexCap ComplexIdentifier
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Condition = Condition Operand Comparison Operand
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data Comparison
     = CompEq -- | a = b
@@ -72,19 +74,19 @@ data Comparison
     | CompGE -- | a >= b
     | CompL  -- | a < b
     | CompLE -- | a <= b
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data ComplexName
     = ShortComplex ComplexIdentifier
     | LongComplex ComplexIdentifier
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
-newtype FunctionName = FunctionName Text  deriving (Eq, Show, IsString, Hashable)
-newtype VarName = VarName Text  deriving (Eq, Show, IsString, Hashable)
-newtype ComplexIdentifier = ComplexIdentifier Text  deriving (Eq, Show, IsString, Hashable)
-newtype ParagraphName = ParagraphName Text  deriving (Eq, Show, IsString, Hashable)
-newtype OperatorName = OperatorName Text  deriving (Eq, Show, IsString, Hashable)
-newtype StringLiteral = StringLiteral Text  deriving (Eq, Show, IsString, Hashable)
+newtype FunctionName = FunctionName Text  deriving (Eq, Ord, Show, IsString, Hashable)
+newtype VarName = VarName Text  deriving (Eq, Ord, Show, IsString, Hashable)
+newtype ComplexIdentifier = ComplexIdentifier Text  deriving (Eq, Ord, Show, IsString, Hashable)
+newtype ParagraphName = ParagraphName Text  deriving (Eq, Ord, Show, IsString, Hashable)
+newtype OperatorName = OperatorName Text  deriving (Eq, Ord, Show, IsString, Hashable)
+newtype StringLiteral = StringLiteral Text  deriving (Eq, Ord, Show, IsString, Hashable)
 
 {-
 -----------------------
@@ -98,24 +100,24 @@ data ExtProgramParams = ExtProgramParams
     , variableSize :: VariableSize
     -- | Возможность импорта функций и операторов из других модулей
     , imports :: [Import]
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 data ExtFunctionParams = ExtFunctionParams
     { public :: Bool
     , operator :: Maybe OperatorName
     , mangleName :: Bool
-    } deriving (Eq, Show)
+    } deriving (Eq, Ord, Show)
 
 data Import
     = ImportIncluding ImportIdentifier [Either FunctionName OperatorName]
     | ImportExcluding ImportIdentifier [Either FunctionName OperatorName]
     | ImportQualified ImportIdentifier ImportRenamer
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 newtype ImportIdentifier = ImportIdentifier Text -- TODO: didn't think this out
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 newtype ImportRenamer = ImportRenamer Text -- TODO: didn't think this out
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 moduleAsItself :: ImportIdentifier -> ImportRenamer
 moduleAsItself (ImportIdentifier x) = ImportRenamer x
 
@@ -123,7 +125,7 @@ data VariableSize
     = Signed8   | Signed16   | Signed32   | Signed64
     | Unsigned8 | Unsigned16 | Unsigned32 | Unsigned64
     | BigNumbers
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 data LangFeature
     -- | Оператор генерации случайного числа
@@ -132,7 +134,7 @@ data LangFeature
     | ConsoleIO
     -- | Комплексы, которые нельзя аллоцировать на стеке, а только на куче
     | LargeComplex
-    deriving (Eq, Show)
+    deriving (Eq, Ord, Show)
 
 
 instance Default ExtProgramParams where
@@ -152,6 +154,13 @@ instance Default ExtFunctionParams where
 instance Default VariableSize where
     def = Unsigned32 -- FIXME: i'm not sure here
 -}
+
+pattern OP :: String -> OperatorName
+pattern OP str <- (unpack . unOperatorName -> str)
+    where OP = OperatorName . pack
+
+unOperatorName :: OperatorName -> Text
+unOperatorName (OperatorName n) = n
 
 
 --------------------------------------------------------------

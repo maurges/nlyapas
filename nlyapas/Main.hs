@@ -6,20 +6,25 @@ import Control.Monad.IO.Class (liftIO)
 import Control.Monad.Reader (runReaderT)
 import Control.Monad.State.Strict (execStateT)
 import Data.Text (Text, pack, unpack, strip)
+import Language.Lyapas.Backend.NaiveNasm (runBuilder, buildProgram)
 import Language.Lyapas.Interpret (_tau, FunctionState (..), ExecutionState (..), runFunction, emptyState, InterpretError (..))
 import Language.Lyapas.Parse (functionBody, program)
 import Language.Lyapas.Syntax (Program (..), FunctionName (..), pretty)
 import Language.Lyapas.Test (execFile)
 import System.Console.Haskeline (InputT, runInputT, defaultSettings, getInputLine, outputStr, outputStrLn)
+import System.Directory (removeFile)
 import System.Environment (getArgs)
+import System.Process (callProcess)
 import Text.Megaparsec (parse, errorBundlePretty)
 
 import qualified Data.Text.IO as TIO
+import qualified Data.Text.Lazy.IO as TIOL
 
 
 main :: IO ()
 main = getArgs >>= \case
     [] -> runInteractive
+    "compile":files -> mapM_ compile files
     files -> mapM_ execFile files
 
 runInteractive :: IO ()
@@ -99,3 +104,15 @@ loadFile r file' =
 listFunctions :: ExecutionState -> InputT IO ()
 listFunctions ExecutionState {_programFunctions} =
     mapM_ (outputStrLn . unpack . pretty) _programFunctions
+
+compile :: FilePath -> IO ()
+compile path = do
+    content <- TIO.readFile path
+    case parse program path content of
+        Left e -> putStrLn $ errorBundlePretty e
+        Right tree -> do
+            let assembly = runBuilder . buildProgram $ tree
+            let asmPath = path <> ".nasm"
+            TIOL.writeFile asmPath assembly
+            callProcess "nasm" ["-felf64", asmPath, "-o", path <> ".o"]
+            -- removeFile asmPath

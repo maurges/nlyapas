@@ -1,4 +1,5 @@
 {-# OPTIONS_GHC -Wno-unused-do-bind #-}
+{-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 module Language.Lyapas.Parse
 --     (
 --     ) where

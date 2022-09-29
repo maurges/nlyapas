@@ -24,6 +24,7 @@ library:
   - bytestring
   - data-default-class
   - clock
+  - containers
   - exceptions
   - hashable
   - megaparsec >= 9.0.0
@@ -50,8 +51,10 @@ executables:
     dependencies:
     - base
     - exceptions
+    - directory
     - haskeline
     - language-lyapas
     - megaparsec >= 9.0.0
     - mtl
+    - process
     - text

@@ -1,6 +1,5 @@
 {-# LANGUAGE TemplateHaskell #-}
 {-# LANGUAGE KindSignatures #-}
-{-# LANGUAGE PatternSynonyms, ViewPatterns #-}
 {-# LANGUAGE TypeFamilies, FlexibleContexts #-}
 {-# LANGUAGE ScopedTypeVariables #-}
 {-# LANGUAGE ConstraintKinds #-}
@@ -605,9 +604,6 @@ getComplex (ShortComplex name) =
 tshow :: Show a => a -> Text
 tshow = pack . show
 
-unOperatorName :: OperatorName -> Text
-unOperatorName (OperatorName n) = n
-
 functionName :: Function -> FunctionName
 functionName (Function x _ _ _) = x
 
@@ -615,7 +611,3 @@ debugState :: LyapasT IO ()
 debugState = do
     s <- State.get
     liftIO . putStrLn $ "#debug state:" <> show s
-
-pattern OP :: String -> OperatorName
-pattern OP str <- (unpack . unOperatorName -> str)
-    where OP = OperatorName . pack
